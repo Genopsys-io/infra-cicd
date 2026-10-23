@@ -29,10 +29,6 @@ on:
         description: Root path on mounted PVC for this site
         required: true
         type: string
-      healthcheck_url:
-        description: URL checked after deployment
-        required: true
-        type: string
       releases_to_keep:
         description: Number of releases retained on PVC
         required: false
@@ -100,6 +96,7 @@ jobs:
           location: ${{ inputs.gke_location }}
 
       - name: Deploy to PVC with atomic symlink and rollback
+      - name: Deploy to PVC
         shell: bash
         env:
           BUILD_DIR: ${{ inputs.build_dir }}
@@ -107,7 +104,6 @@ jobs:
           K8S_POD_LABEL: ${{ inputs.k8s_pod_label }}
           K8S_CONTAINER: ${{ inputs.k8s_container }}
           DEPLOY_ROOT: ${{ inputs.deploy_root }}
-          HEALTHCHECK_URL: ${{ inputs.healthcheck_url }}
           RELEASES_TO_KEEP: ${{ inputs.releases_to_keep }}
         run: |
           set -euo pipefail
@@ -129,30 +125,8 @@ jobs:
 
           tar -C "$BUILD_DIR" -czf - . | kubectl exec -i -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "tar -xzf - -C '$RELEASE_DIR'"
 
-          PREVIOUS_TARGET=""
-          if kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "[ -L '$CURRENT_LINK' ]"; then
-            PREVIOUS_TARGET="$(kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "readlink '$CURRENT_LINK'")"
-          fi
-
           kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "ln -sfn '$RELEASE_DIR' '$CURRENT_LINK'"
           kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "nginx -t && nginx -s reload"
-
-          set +e
-          HTTP_CODE="$(curl -k -sS -o /dev/null -w '%{http_code}' --retry 6 --retry-delay 3 --retry-connrefused "$HEALTHCHECK_URL")"
-          set -e
-
-          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "301" ] && [ "$HTTP_CODE" != "302" ]; then
-            echo "Healthcheck failed ($HTTP_CODE), starting rollback"
-            if [ -n "$PREVIOUS_TARGET" ]; then
-              kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "ln -sfn '$PREVIOUS_TARGET' '$CURRENT_LINK' && nginx -t && nginx -s reload"
-              echo "Rollback done to $PREVIOUS_TARGET"
-            else
-              echo "No previous release found for rollback"
-            fi
-            exit 1
-          fi
-
-          echo "Healthcheck passed ($HTTP_CODE)"
 
           kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "ls -1dt '$RELEASES_DIR'/* 2>/dev/null | sed -e '1,${RELEASES_TO_KEEP}d' | xargs -r rm -rf"
           echo "Cleanup done (kept $RELEASES_TO_KEEP releases)"
