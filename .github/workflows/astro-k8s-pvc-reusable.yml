@@ -95,7 +95,6 @@ jobs:
           cluster_name: ${{ inputs.gke_cluster_name }}
           location: ${{ inputs.gke_location }}
 
-      - name: Deploy to PVC with atomic symlink and rollback
       - name: Deploy to PVC
         shell: bash
         env:
