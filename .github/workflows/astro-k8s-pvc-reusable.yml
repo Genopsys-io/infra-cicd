@@ -1,0 +1,137 @@
+name: Reusable Astro Deploy to Kubernetes PVC
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node.js version used for build
+        required: false
+        type: string
+        default: "22"
+      build_dir:
+        description: Astro build output directory
+        required: false
+        type: string
+        default: dist
+      k8s_namespace:
+        description: Kubernetes namespace containing target pod
+        required: true
+        type: string
+      k8s_pod_label:
+        description: Label selector to locate target pod
+        required: true
+        type: string
+      k8s_container:
+        description: Container name running nginx
+        required: true
+        type: string
+      deploy_root:
+        description: Root path on mounted PVC for this site
+        required: true
+        type: string
+      healthcheck_url:
+        description: URL checked after deployment
+        required: true
+        type: string
+      releases_to_keep:
+        description: Number of releases retained on PVC
+        required: false
+        type: string
+        default: "5"
+    secrets:
+      kube_config_data:
+        description: Base64-encoded kubeconfig
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Astro
+        run: npm run build
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Write kubeconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.kube_config_data }}" | base64 --decode > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Deploy to PVC with atomic symlink and rollback
+        shell: bash
+        env:
+          BUILD_DIR: ${{ inputs.build_dir }}
+          K8S_NAMESPACE: ${{ inputs.k8s_namespace }}
+          K8S_POD_LABEL: ${{ inputs.k8s_pod_label }}
+          K8S_CONTAINER: ${{ inputs.k8s_container }}
+          DEPLOY_ROOT: ${{ inputs.deploy_root }}
+          HEALTHCHECK_URL: ${{ inputs.healthcheck_url }}
+          RELEASES_TO_KEEP: ${{ inputs.releases_to_keep }}
+        run: |
+          set -euo pipefail
+
+          BUILD_SHA="${GITHUB_SHA::12}"
+          RELEASES_DIR="$DEPLOY_ROOT/releases"
+          RELEASE_DIR="$RELEASES_DIR/$BUILD_SHA"
+          CURRENT_LINK="$DEPLOY_ROOT/current"
+
+          POD_NAME="$(kubectl get pod -n "$K8S_NAMESPACE" -l "$K8S_POD_LABEL" -o jsonpath='{.items[0].metadata.name}')"
+          if [ -z "$POD_NAME" ]; then
+            echo "No pod found for label: $K8S_POD_LABEL"
+            exit 1
+          fi
+
+          echo "Deploying commit $BUILD_SHA to pod $POD_NAME"
+
+          kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "mkdir -p '$RELEASE_DIR' '$RELEASES_DIR' '$DEPLOY_ROOT'"
+
+          tar -C "$BUILD_DIR" -czf - . | kubectl exec -i -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "tar -xzf - -C '$RELEASE_DIR'"
+
+          PREVIOUS_TARGET=""
+          if kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "[ -L '$CURRENT_LINK' ]"; then
+            PREVIOUS_TARGET="$(kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "readlink '$CURRENT_LINK'")"
+          fi
+
+          kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "ln -sfn '$RELEASE_DIR' '$CURRENT_LINK'"
+          kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "nginx -t && nginx -s reload"
+
+          set +e
+          HTTP_CODE="$(curl -k -sS -o /dev/null -w '%{http_code}' --retry 6 --retry-delay 3 --retry-connrefused "$HEALTHCHECK_URL")"
+          set -e
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "301" ] && [ "$HTTP_CODE" != "302" ]; then
+            echo "Healthcheck failed ($HTTP_CODE), starting rollback"
+            if [ -n "$PREVIOUS_TARGET" ]; then
+              kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "ln -sfn '$PREVIOUS_TARGET' '$CURRENT_LINK' && nginx -t && nginx -s reload"
+              echo "Rollback done to $PREVIOUS_TARGET"
+            else
+              echo "No previous release found for rollback"
+            fi
+            exit 1
+          fi
+
+          echo "Healthcheck passed ($HTTP_CODE)"
+
+          kubectl exec -n "$K8S_NAMESPACE" "$POD_NAME" -c "$K8S_CONTAINER" -- sh -lc "ls -1dt '$RELEASES_DIR'/* 2>/dev/null | sed -e '1,${RELEASES_TO_KEEP}d' | xargs -r rm -rf"
+          echo "Cleanup done (kept $RELEASES_TO_KEEP releases)"
