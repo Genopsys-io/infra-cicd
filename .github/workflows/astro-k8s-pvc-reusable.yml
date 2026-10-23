@@ -3,11 +3,6 @@ name: Reusable Astro Deploy to Kubernetes PVC
 on:
   workflow_call:
     inputs:
-      auth_mode:
-        description: Authentication mode (kubeconfig or oidc)
-        required: false
-        type: string
-        default: kubeconfig
       node_version:
         description: Node.js version used for build
         required: false
@@ -44,29 +39,22 @@ on:
         type: string
         default: "5"
       gke_location:
-        description: GKE cluster location (required when auth_mode=oidc)
-        required: false
+        description: GKE cluster location
+        required: true
         type: string
-        default: ""
       gke_cluster_name:
-        description: GKE cluster name (required when auth_mode=oidc)
-        required: false
+        description: GKE cluster name
+        required: true
         type: string
-        default: ""
       gcp_service_account_email:
-        description: GCP service account email (required when auth_mode=oidc)
-        required: false
+        description: GCP service account email
+        required: true
         type: string
-        default: ""
       gcp_workload_identity_provider:
-        description: GCP workload identity provider resource ID (required when auth_mode=oidc)
-        required: false
+        description: GCP workload identity provider resource ID
+        required: true
         type: string
-        default: ""
-    secrets:
-      kube_config_data:
-        description: Base64-encoded kubeconfig
-        required: false
+
 
 permissions:
   contents: read
@@ -96,69 +84,20 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
 
-      - name: Validate auth configuration
-        shell: bash
-        env:
-          AUTH_MODE: ${{ inputs.auth_mode }}
-          KUBE_CONFIG_DATA: ${{ secrets.kube_config_data }}
-          GKE_LOCATION: ${{ inputs.gke_location }}
-          GKE_CLUSTER_NAME: ${{ inputs.gke_cluster_name }}
-          GCP_SERVICE_ACCOUNT_EMAIL: ${{ inputs.gcp_service_account_email }}
-          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ inputs.gcp_workload_identity_provider }}
-        run: |
-          set -euo pipefail
-
-          case "$AUTH_MODE" in
-            kubeconfig)
-              if [ -z "$KUBE_CONFIG_DATA" ]; then
-                echo "kube_config_data secret is required when auth_mode=kubeconfig"
-                exit 1
-              fi
-              ;;
-            oidc)
-              missing=0
-              for v in GKE_LOCATION GKE_CLUSTER_NAME GCP_SERVICE_ACCOUNT_EMAIL GCP_WORKLOAD_IDENTITY_PROVIDER; do
-                if [ -z "${!v:-}" ]; then
-                  echo "Missing required input for OIDC mode: $v"
-                  missing=1
-                fi
-              done
-              if [ "$missing" -ne 0 ]; then
-                exit 1
-              fi
-              ;;
-            *)
-              echo "Unsupported auth_mode: $AUTH_MODE"
-              exit 1
-              ;;
-          esac
-
       - name: Auth GCP (OIDC)
-        if: ${{ inputs.auth_mode == 'oidc' }}
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
           service_account: ${{ inputs.gcp_service_account_email }}
 
       - name: Setup gcloud (OIDC)
-        if: ${{ inputs.auth_mode == 'oidc' }}
         uses: google-github-actions/setup-gcloud@v3
 
       - name: Get GKE credentials (OIDC)
-        if: ${{ inputs.auth_mode == 'oidc' }}
         uses: google-github-actions/get-gke-credentials@v3
         with:
           cluster_name: ${{ inputs.gke_cluster_name }}
           location: ${{ inputs.gke_location }}
-
-      - name: Write kubeconfig (kubeconfig mode)
-        if: ${{ inputs.auth_mode == 'kubeconfig' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.kube"
-          echo "${{ secrets.kube_config_data }}" | base64 --decode > "$HOME/.kube/config"
-          chmod 600 "$HOME/.kube/config"
 
       - name: Deploy to PVC with atomic symlink and rollback
         shell: bash
