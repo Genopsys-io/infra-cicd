@@ -43,7 +43,15 @@ gcloud config set project www-genopsys
 
 ### Bootstrap command
 
-Clone this repository once, then run:
+The shortest path does not require cloning this repository:
+
+```bash
+gh api repos/Genopsys-io/infra-cicd/contents/scripts/init-astro-repo.sh \
+   --jq '.content' | base64 --decode | \
+   bash -s -- Genopsys-io/<repository> <site-id>
+```
+
+Alternatively, from a clone of this repository:
 
 ```bash
 ./scripts/init-astro-repo.sh Genopsys-io/<repository> <site-id>
@@ -76,6 +84,24 @@ The command refuses to replace an existing workflow. Review it first, then use
 ```bash
 ./scripts/init-astro-repo.sh Genopsys-io/<repository> <site-id> --force
 ```
+
+With the one-line form, append `--force` after `<site-id>`.
+
+### Give the internal team access
+
+Do not grant Secret Manager access to the whole Google Workspace domain. Use a
+dedicated Google group and grant it access only to this secret:
+
+```bash
+gcloud secrets add-iam-policy-binding astro-cicd-github-variables \
+   --project=www-genopsys \
+   --member='group:developers@kannel.io' \
+   --role='roles/secretmanager.secretAccessor'
+```
+
+Replace `developers@kannel.io` with the actual internal development group. The
+group also needs permission to update Actions variables and workflow files in
+the target GitHub repositories.
 
 ### Variables installed in the project
 

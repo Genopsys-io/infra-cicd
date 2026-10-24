@@ -50,9 +50,29 @@ for command in gh gcloud base64; do
   fi
 done
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
-template="$repo_root/templates/astro-k8s-pvc-deploy.yml"
+source_path="${BASH_SOURCE[0]:-}"
+if [ -n "$source_path" ]; then
+  script_dir="$(cd "$(dirname "$source_path")" && pwd)"
+  repo_root="$(cd "$script_dir/.." && pwd)"
+  template="$repo_root/templates/astro-k8s-pvc-deploy.yml"
+else
+  template=""
+fi
+template_tmp=""
+
+cleanup() {
+  if [ -n "$template_tmp" ]; then
+    rm -f "$template_tmp"
+  fi
+}
+trap cleanup EXIT
+
+if [ -z "$template" ] || [ ! -f "$template" ]; then
+  template_tmp="$(mktemp)"
+  gh api repos/Genopsys-io/infra-cicd/contents/templates/astro-k8s-pvc-deploy.yml \
+    --jq '.content' | base64 --decode > "$template_tmp"
+  template="$template_tmp"
+fi
 
 secret_project="${ASTRO_CICD_SECRET_PROJECT:-www-genopsys}"
 secret_name="${ASTRO_CICD_SECRET_NAME:-astro-cicd-github-variables}"
